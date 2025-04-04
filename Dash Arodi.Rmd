@@ -1,0 +1,225 @@
+---
+title: "PRIMERA CIRCUNSCRIPCION"
+output: 
+  flexdashboard::flex_dashboard:
+    theme:
+      bg: "#FFFFFF"
+      fg: "#CD5B45" 
+      primary: "#8B3E2F"
+      base_font:
+        google: Prompt
+      code_font:
+        google: JetBrains Mono
+    orientation: columns
+    vertical_layout: fill
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(leaflet)
+library(leaflet.extras)
+library(sf)
+library(readxl)
+
+# Jalisco
+votos_2024_presi_Jal <- read.csv("D:/Morena- Arrodi/PRES_2024.csv") %>% janitor::clean_names() %>% 
+  filter(entidad == "JALISCO") %>% 
+  mutate(across(12:31, as.numeric)) %>% 
+  rename(SECCION = seccion)
+
+
+votos_2024_presi_Jal[is.na(votos_2024_presi_Jal)] = 0
+names(votos_2024_presi_Jal)
+
+votos_2024_presi_Jal= votos_2024_presi_Jal %>% group_by(SECCION) %>% 
+  summarise(morena = sum(as.numeric(morena)),
+            total_votos_calculados = sum(total_votos_calculados))
+
+votos_2024_presi_Jal = votos_2024_presi_Jal %>% 
+  mutate(Porncentaje_MORENA = round((morena/total_votos_calculados)*100,2))
+
+######################### carganos las shp de secciones
+# SHAPES secciones 2024
+Jal_poly_secc_2024 = read_sf("D:/Morena- Arrodi/secciones_2024.gpkg",
+                             options = "ENCODING=latin1") %>% filter(NOMBRE_ENTIDAD == "JALISCO") 
+
+Jal_poly_secc_2024  = st_transform(Jal_poly_secc_2024, crs = "+proj=longlat +datum=WGS84")
+Jal_poly_secc_2024 = Jal_poly_secc_2024[st_is_valid(Jal_poly_secc_2024),]
+
+# obtenemos la rentabilidad por sección y contando la densidad territorial
+JALISCO_PRESI = merge(Jal_poly_secc_2024, votos_2024_presi_Jal, by = "SECCION")
+
+
+# Definir la cantidad de filas y columnas deseadas
+filas <- 300
+columnas <- 300
+
+# Dividir el polígono original en una cuadrícula de filas x columnas
+distrito_dividido_base <- st_make_grid(JALISCO_PRESI, n = c(filas, columnas), square = F)
+distrito_dividido_base = sf::st_as_sf(distrito_dividido_base, crs = "+proj=longlat +datum=WGS84")
+
+
+distrito_dividido = sf::st_as_sf(distrito_dividido_base, crs = "+proj=longlat +datum=WGS84")
+distrito_dividido = distrito_dividido %>% mutate(ID_hexagonal = 1:nrow(distrito_dividido))
+
+
+distrito_dividido <- st_join(distrito_dividido, JALISCO_PRESI, join = st_intersects)
+
+distrito_dividido = distrito_dividido %>% filter(!is.na(SECCION))  %>% unique()
+
+distrito_dividido = distrito_dividido %>% group_by(ID_hexagonal) %>% 
+  summarise(
+    Porncentaje_MORENA_general = mean(Porncentaje_MORENA),
+    Votos_morena = sum(morena), 
+    total_votos_calculados = sum(total_votos_calculados))
+
+
+########################## agora calculamos hezxagonos de las agebs
+
+AGEB_polygonos = read_sf("D:/Morena- Arrodi/14a.shp")
+
+AGEB_polygonos  = st_transform(AGEB_polygonos, crs = "+proj=longlat +datum=WGS84") 
+
+
+distrito_dividido_agebs <- st_join(distrito_dividido_base, AGEB_polygonos, join = st_intersects)
+remove(distrito_dividido_base)
+
+distrito_dividido_agebs = distrito_dividido_agebs %>% filter(!is.na(CVEGEO)) %>% unique() 
+
+distrito_dividido_agebs = distrito_dividido_agebs%>% 
+  mutate(ID = 1:nrow(distrito_dividido_agebs))
+
+distrito_dividido_agebs = distrito_dividido_agebs %>% group_by(geometry) %>% 
+  summarise(ID = sum(ID))
+
+
+
+
+
+########## datos para estados
+
+Estados_shape = read_sf("D:/Morena- Arrodi/ENTIDAD.shp") 
+
+Estados_shape  = st_transform(Estados_shape, crs = "+proj=longlat +datum=WGS84") %>% janitor::clean_names()
+
+Avance = readxl::read_xlsx("D:/Morena- Arrodi/Libro1.xlsx")%>% janitor::clean_names()
+
+Estados_shape = merge(Estados_shape,Avance,  by = "entidad" )
+
+# 8. Definir colores por avance
+get_color <- function(pct) {
+  case_when(
+    is.na(pct) ~ "gray",
+    pct < .20 ~ "red",
+    pct < .25 ~ "yellow",
+    pct <= .90 ~ "green",
+    TRUE ~ "gray"
+  )
+}
+
+Estados_shape$color <- get_color(Estados_shape$porcentaje_de_avance)
+
+
+```
+
+## Column {.tabset data-width="650"}
+
+### Avance estados
+
+```{r}
+
+# 9. Crear mapa en leaflet
+leaflet(Estados_shape) %>%
+  addTiles() %>%
+  addPolygons(
+    fillColor = ~color,
+    color = "white",
+    weight = 1,
+    fillOpacity = 0.7,
+    label = ~paste0(
+      nombre, "<br>",
+      "Meta: ", meta_total_estado, "<br>",
+      "Registro: ", registro, "<br>",
+      "Avance: %", porcentaje_de_avance*100)  %>% lapply(htmltools::HTML),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      color = "#666",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    )
+  )
+
+
+```
+
+
+
+### 500 mejores polignos JAL
+
+```{r}
+######### ahora unimos las dos bases de hexagonos
+distrito_dividido_ageb_votos <- st_join(distrito_dividido_agebs, distrito_dividido, join = st_intersects)
+
+
+distrito_dividido_ageb_votos = distrito_dividido_ageb_votos   %>% unique()
+
+distrito_dividido_ageb_votos = distrito_dividido_ageb_votos %>% group_by(geometry) %>% 
+  summarise(
+    Morena = sum(Votos_morena),
+    total_votos_calculados = sum(total_votos_calculados))
+# calcuamos los porcentajes
+
+distrito_dividido_ageb_votos = distrito_dividido_ageb_votos %>% 
+  mutate(Porncentaje_MORENA = Morena/total_votos_calculados)
+distrito_dividido_ageb_votos_seleccion <- distrito_dividido_ageb_votos %>%
+  arrange(desc(Porncentaje_MORENA)) %>%  slice(1:500)
+# para graficar jalisco 
+Estados_shape = Estados_shape %>% filter(entidad_nombre == "JALISCO")
+
+
+pal <- colorNumeric("Reds",domain =distrito_dividido_ageb_votos_seleccion$Porncentaje_MORENA)
+
+
+leaflet(distrito_dividido_ageb_votos_seleccion) %>%
+addTiles(group = "Mapa Base") %>%
+  addProviderTiles(providers$Esri.WorldImagery, group = "Imagen Satelital") %>%
+  addPolygons(data =distrito_dividido_ageb_votos_seleccion, smoothFactor = 0.3, fillOpacity = .6, color = "black",weight = 1,
+              fillColor = ~pal(distrito_dividido_ageb_votos_seleccion$Porncentaje_MORENA), 
+              label  = paste0("Votos Morena: ", distrito_dividido_ageb_votos_seleccion$Morena, "<br>", "Total Votos: ", distrito_dividido_ageb_votos_seleccion$total_votos_calculados, "<br>" ,"% voto morena: ", distrito_dividido_ageb_votos_seleccion$Porncentaje_MORENA) %>% lapply(htmltools::HTML),  group = 'seccion') %>% 
+  addLegend("bottomright", 
+            pal = pal, values = ~Porncentaje_MORENA, opacity = 0.7, title = "Porcentaje votos Morena")  %>%
+  addLayersControl(
+    baseGroups = c("Mapa Base", "Imagen Satelital"),
+    overlayGroups = c("seccion"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+
+```
+
+## Column {data-width="300" data-height="1600"}
+
+### Secciones con mayor % de voto morena
+
+```{r}
+library(kableExtra)
+library(formattable)
+
+JALISCO_PRESI_tabla <- JALISCO_PRESI %>%
+  arrange(desc(Porncentaje_MORENA)) %>%
+  as.data.frame() %>% 
+  select(SECCION, MUNICIPIO,NOMBRE_MUNICIPIO, morena, Porncentaje_MORENA) %>% 
+  rename(Num_votos_morena= morena,
+         Porcentaje_morena = Porncentaje_MORENA)
+
+
+kbl(JALISCO_PRESI_tabla) %>%
+  kable_paper("striped", full_width = F) %>%
+  row_spec(1:20, bold = T, color = "#000F08", background = "#FFF8DC") %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                font_size = 15) %>%
+  scroll_box(height = "480px")
+
+
+
+```
